@@ -27,11 +27,11 @@ def custom_kernel(data: input_t) -> output_t:
 
     A, _, _, B_shuffle, B_scale_sh = data
     A = A.contiguous()
-    m, _ = A.shape
+    m, k = A.shape
     n = B_shuffle.shape[0]
 
     A_q, A_scale_sh = _quant_mxfp4(A)
-    if m < 32:
+    if m < 32 or (m == 32 and n == 4096 and k <= 1024):
         out = torch.empty(((m + 31) // 32 * 32, n), dtype=dtypes.bf16, device=A.device)
         out_gemm = aiter.gemm_a4w4_asm(
             A_q,
