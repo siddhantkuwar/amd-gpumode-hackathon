@@ -1,0 +1,67 @@
+Iteration: 005
+Date: 2026-04-01
+
+Summary:
+- Used iteration 5 to probe the last few plausible exact-shape overrides that might beat the iteration-4 best.
+- Tested two narrow candidates against the iteration-4 baseline.
+- Neither candidate produced a net improvement, so the code was reverted to the verified iteration-4 routing.
+
+Starting point from iteration 4:
+- k=512, m=4, n=2880: 17.8 us
+- k=7168, m=16, n=2112: 29.9 us
+- k=512, m=32, n=4096: 18.3 us
+- k=512, m=32, n=2880: 18.4 us
+- k=2048, m=64, n=7168: 24.4 us
+- k=1536, m=256, n=3072: 22.9 us
+- Average: 21.95 us
+
+Candidate A:
+- Change:
+  - keep the iteration-4 routing
+  - also force direct ASM `64x128` for exact `(M=32, N=4096, K<=1024)`
+- Why it seemed plausible:
+  - `(32,4096,512)` was still untuned by the wrapper and the public tuning data for nearby low-K cases suggested alternative kernels might help
+- Benchmark results:
+  - k=512, m=4, n=2880: 18.1 us
+  - k=7168, m=16, n=2112: 29.5 us
+  - k=512, m=32, n=4096: 18.6 us
+  - k=512, m=32, n=2880: 18.7 us
+  - k=2048, m=64, n=7168: 24.3 us
+  - k=1536, m=256, n=3072: 23.1 us
+  - Average: 22.05 us
+- Result:
+  - worse than iteration 4 by about +0.10 us on average
+  - target shape `(32,4096,512)` regressed from 18.3 us to 18.6 us
+
+Candidate B:
+- Change:
+  - restore iteration-4 kernel routing
+  - for exact `(M=16, N=2112, K>=4096)`, keep the same ASM `32x128` kernel but set `log2_k_split=1`
+- Why it seemed plausible:
+  - this is the slowest remaining untuned benchmark case and high-K small-M problems are the only place split-K might plausibly help
+- Benchmark results:
+  - k=512, m=4, n=2880: 17.9 us
+  - k=7168, m=16, n=2112: 29.9 us
+  - k=512, m=32, n=4096: 18.4 us
+  - k=512, m=32, n=2880: 18.5 us
+  - k=2048, m=64, n=7168: 24.5 us
+  - k=1536, m=256, n=3072: 23.2 us
+  - Average: 22.07 us
+- Result:
+  - worse than iteration 4 by about +0.12 us on average
+  - no improvement on the target shape; `(16,2112,7168)` stayed effectively flat at 29.9 us
+
+Final decision:
+- Keep iteration-4 as the best verified submission state.
+- Do not keep either iteration-5 candidate.
+
+Final code state after iteration 5:
+- `M < 32` uses direct ASM
+- exact `(M=32, N=4096, K<=1024)` uses direct ASM `32x128`
+- exact `(M=32, N=2880, K<=1024)` uses direct ASM `64x128`
+- everything else falls back to `aiter.gemm_a4w4(...)`
+
+Takeaways:
+- The remaining search space is getting much narrower.
+- The obvious nearby kernel substitutions no longer beat the current best.
+- Future wins will likely require either a more exotic shape-specific kernel choice or a different optimization layer than the current dispatch overrides.
