@@ -1,0 +1,72 @@
+Iteration: 002
+Date: 2026-04-01
+
+Summary:
+- Investigated why the round-1 Python cleanup did not help.
+- Confirmed the real measured path is dominated by quantization + GEMM kernels, not import/helper overhead.
+- Tried two quant-path changes first; one was API-incompatible with the runner and one changed numerics enough to fail correctness.
+- Landed a working hybrid optimization: use direct ASM GEMM only for very small M (`M < 32`), and keep the original `aiter.gemm_a4w4` path for larger shapes.
+
+Why round 1 did nothing:
+- The expensive work is in GPU kernels: `dynamic_mxfp4_quant`, `e8m0_shuffle`, and `gemm_a4w4`.
+- Moving imports and deleting tiny Python-side scaffolding does not change which GPU kernel runs.
+- The benchmark logs repeatedly showed: `not found tuned config ... will use default config!`
+- That means the dominant GEMM path stayed the same before and after round 1.
+- Removing `B.contiguous()` and unused shape reads was too small to matter relative to the microsecond-level GPU work.
+- Net result: round 1 only changed wrapper overhead, not the actual kernel selection or quantization/GEMM behavior.
+
+Iteration-2 sub-attempts that failed:
+- Attempt A: call `dynamic_mxfp4_quant(x, shuffle=True)` directly.
+  - Result: failed on the remote runner because that API version does not accept a `shuffle` keyword.
+- Attempt B: switch to `aiter.get_triton_quant(QuantType.per_1x32)`.
+  - Result: ran, but produced mismatched outputs and failed correctness.
+  - Takeaway: the quantization path is version-sensitive and must match the runner's expected format exactly.
+
+Final iteration-2 change kept:
+- Keep the original known-correct quantization path:
+  - `dynamic_mxfp4_quant(x)`
+  - `e8m0_shuffle(...)`
+- For `M < 32`, bypass `aiter.gemm_a4w4(...)` and call `aiter.gemm_a4w4_asm(...)` directly with the known small-M kernel:
+  - `_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E`
+- For `M >= 32`, fall back to the original `aiter.gemm_a4w4(...)` wrapper.
+
+Why this works:
+- The direct ASM path removes `aiter.gemm_a4w4` wrapper/config-dispatch overhead for the tiny-M cases where that overhead matters most.
+- Larger-M shapes regressed when forced onto the direct path, so the optimization is only enabled where it helped.
+
+Baseline benchmark results:
+- k=512, m=4, n=2880: 18.8 us
+- k=7168, m=16, n=2112: 33.8 us
+- k=512, m=32, n=4096: 19.4 us
+- k=512, m=32, n=2880: 19.5 us
+- k=2048, m=64, n=7168: 24.7 us
+- k=1536, m=256, n=3072: 23.1 us
+- Average: 23.22 us
+
+Iteration-2 final benchmark results:
+- k=512, m=4, n=2880: 18.2 us
+- k=7168, m=16, n=2112: 29.6 us
+- k=512, m=32, n=4096: 19.6 us
+- k=512, m=32, n=2880: 19.6 us
+- k=2048, m=64, n=7168: 24.4 us
+- k=1536, m=256, n=3072: 23.1 us
+- Average: 22.42 us
+
+Delta vs baseline:
+- k=512, m=4, n=2880: -0.6 us
+- k=7168, m=16, n=2112: -4.2 us
+- k=512, m=32, n=4096: +0.2 us
+- k=512, m=32, n=2880: +0.1 us
+- k=2048, m=64, n=7168: -0.3 us
+- k=1536, m=256, n=3072: +0.0 us
+- Average change: -0.80 us
+- Relative average improvement: about 3.4%
+
+Correctness:
+- Final hybrid submission passed 4/4 tests
+- Maximum error: 0.0 on all reported test cases
+
+Takeaways:
+- Wrapper overhead only matters for the very small-M shapes.
+- Quantization-path changes are risky and can silently change numerical behavior.
+- The next optimization round should continue targeting shape-dependent dispatch decisions, especially for the small-M and large-K region.
