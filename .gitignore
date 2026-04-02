@@ -1,0 +1,34 @@
+# Agent / local tooling
+.claude/
+.codex/
+.popcorn/
+AGENTS.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
+*.token
+secrets.*
+credentials.*
+*.jsonl
+
+# OS / editor noise
+.DS_Store
+.vscode/
+.idea/
+
+# Benchmark / scratch outputs
+*.log
+tmp/
+temp/
+.cache/
