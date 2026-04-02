@@ -31,7 +31,12 @@ def custom_kernel(data: input_t) -> output_t:
     n = B_shuffle.shape[0]
 
     A_q, A_scale_sh = _quant_mxfp4(A)
-    if m < 32 or (m == 32 and n == 4096 and k <= 1024):
+    if m < 32 or (m == 32 and n in (2880, 4096) and k <= 1024):
+        kernel_name = (
+            "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_64x128E"
+            if m == 32 and n == 2880 and k <= 1024
+            else "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E"
+        )
         out = torch.empty(((m + 31) // 32 * 32, n), dtype=dtypes.bf16, device=A.device)
         out_gemm = aiter.gemm_a4w4_asm(
             A_q,
@@ -39,7 +44,7 @@ def custom_kernel(data: input_t) -> output_t:
             A_scale_sh,
             B_scale_sh,
             out,
-            "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E",
+            kernel_name,
             bpreshuffle=True,
             log2_k_split=0,
         )
