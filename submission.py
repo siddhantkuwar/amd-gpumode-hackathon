@@ -5,6 +5,7 @@
 FP4 quant + FP4 GEMM reference: bf16 A, MXFP4 B -> MXFP4 per-1x32 quant A -> gemm_a4w4 -> bf16 C.
 Quant logic follows aiter op_tests/test_gemm_a4w4.py (get_triton_quant(QuantType.per_1x32)).
 """
+
 from task import input_t, output_t
 
 
@@ -15,7 +16,7 @@ def custom_kernel(data: input_t) -> output_t:
     """
     import aiter
     from aiter import QuantType, dtypes
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant 
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
     from aiter.utility.fp4_utils import e8m0_shuffle
 
     def _quant_mxfp4(x, shuffle=True):
@@ -23,7 +24,7 @@ def custom_kernel(data: input_t) -> output_t:
         if shuffle:
             bs_e8m0 = e8m0_shuffle(bs_e8m0)
         return x_fp4.view(dtypes.fp4x2), bs_e8m0.view(dtypes.fp8_e8m0)
-    
+
     A, B, B_q, B_shuffle, B_scale_sh = data
     A = A.contiguous()
     B = B.contiguous()

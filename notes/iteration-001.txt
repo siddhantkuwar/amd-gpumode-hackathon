@@ -1,0 +1,41 @@
+Iteration: 001
+Date: 2026-04-01
+
+Summary:
+- Established benchmark baseline for the reference submission.
+- Tried a low-risk cleanup pass in `submission.py`.
+- Result was effectively flat overall, so the optimization was not kept as a performance win.
+
+Baseline benchmark results:
+- k=512, m=4, n=2880: 18.8 us
+- k=7168, m=16, n=2112: 33.8 us
+- k=512, m=32, n=4096: 19.4 us
+- k=512, m=32, n=2880: 19.5 us
+- k=2048, m=64, n=7168: 24.7 us
+- k=1536, m=256, n=3072: 23.1 us
+- Average: 23.22 us
+
+Round 1 experiment:
+- Hoisted imports/helper setup out of `custom_kernel()`.
+- Removed obviously unused tensor/layout work.
+
+Round 1 benchmark results:
+- k=512, m=4, n=2880: 19.3 us
+- k=7168, m=16, n=2112: 33.6 us
+- k=512, m=32, n=4096: 19.7 us
+- k=512, m=32, n=2880: 19.6 us
+- k=2048, m=64, n=7168: 24.2 us
+- k=1536, m=256, n=3072: 23.1 us
+- Average: 23.25 us
+
+Delta vs baseline:
+- Average change: +0.03 us
+- Interpretation: no meaningful improvement
+
+Correctness:
+- Passed 4/4 tests
+
+Takeaways:
+- Python-level cleanup is not the main bottleneck.
+- The benchmark logs show `aiter` falling back to default configs for several shapes.
+- Next optimization round should focus on kernel/config selection or data layout behavior, not micro-cleanups.

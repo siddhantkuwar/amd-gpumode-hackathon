@@ -1,10 +1,10 @@
-# Agent / local tooling
+# Local agent/tooling metadata
 .claude/
 .codex/
 .popcorn/
 AGENTS.md
 
-# Python
+# Python cache and environments
 __pycache__/
 *.py[cod]
 *.so
@@ -12,7 +12,7 @@ __pycache__/
 venv/
 env/
 
-# Environment / secrets
+# Environment and secrets
 .env
 .env.*
 *.key
@@ -20,15 +20,14 @@ env/
 *.token
 secrets.*
 credentials.*
-*.jsonl
 
-# OS / editor noise
+# Editor and OS noise
 .DS_Store
 .vscode/
 .idea/
 
-# Benchmark / scratch outputs
+# Local logs and scratch output
 *.log
+.cache/
 tmp/
 temp/
-.cache/
