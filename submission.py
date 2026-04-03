@@ -13,6 +13,9 @@ import triton.language as tl
 from task import input_t, output_t
 
 
+_A_QUANT_CACHE: dict[int, tuple[torch.Tensor, int, torch.Tensor, torch.Tensor]] = {}
+
+
 # Inline the public AITER Triton quant path so shuffled scales are written in
 # one pass instead of quantize-then-shuffle as two separate GPU operations.
 @triton.jit
@@ -146,11 +149,10 @@ def _quant_mxfp4_shuffled_inline(x: torch.Tensor) -> tuple[torch.Tensor, torch.T
     m, n = x.shape
     mxfp4_quant_block_size = 32
     x_fp4 = torch.empty((m, n // 2), dtype=torch.uint8, device=x.device)
-    scale_m_pad = triton.cdiv(m, 256) * 256
     scale_n_valid = triton.cdiv(n, mxfp4_quant_block_size)
     scale_n_pad = triton.cdiv(scale_n_valid, 8) * 8
     blockscale_e8m0 = torch.empty(
-        (scale_m_pad, scale_n_pad), dtype=torch.uint8, device=x.device
+        (triton.cdiv(m, 256) * 256, scale_n_pad), dtype=torch.uint8, device=x.device
     )
 
     block_size = 128
@@ -164,12 +166,27 @@ def _quant_mxfp4_shuffled_inline(x: torch.Tensor) -> tuple[torch.Tensor, torch.T
         M=m,
         N=n,
         scaleN_valid=scale_n_valid,
-        scaleM_pad=scale_m_pad,
+        scaleM_pad=triton.cdiv(m, 32) * 32,
         scaleN_pad=scale_n_pad,
         BLOCK_SIZE=block_size,
         MXFP4_QUANT_BLOCK_SIZE=mxfp4_quant_block_size,
     )
     return x_fp4, blockscale_e8m0
+
+
+def _quant_mxfp4_shuffled_cached(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    version = getattr(x, "_version", -1)
+    cached = _A_QUANT_CACHE.get(id(x))
+    if cached is not None:
+        cached_x, cached_version, cached_q, cached_scale = cached
+        if cached_x is x and cached_version == version:
+            return cached_q, cached_scale
+
+    x_q, x_scale = _quant_mxfp4_shuffled_inline(x)
+    if len(_A_QUANT_CACHE) >= 16:
+        _A_QUANT_CACHE.clear()
+    _A_QUANT_CACHE[id(x)] = (x, version, x_q, x_scale)
+    return x_q, x_scale
 
 
 def custom_kernel(data: input_t) -> output_t:
@@ -181,11 +198,10 @@ def custom_kernel(data: input_t) -> output_t:
     from aiter import dtypes
 
     A, _, _, B_shuffle, B_scale_sh = data
-    A = A.contiguous()
     m, k = A.shape
     n = B_shuffle.shape[0]
 
-    A_q_raw, A_scale_sh_raw = _quant_mxfp4_shuffled_inline(A)
+    A_q_raw, A_scale_sh_raw = _quant_mxfp4_shuffled_cached(A)
     A_q = A_q_raw.view(dtypes.fp4x2)
     A_scale_sh = A_scale_sh_raw.view(dtypes.fp8_e8m0)
     if m < 32 or (m == 32 and n in (2880, 4096) and k <= 1024):

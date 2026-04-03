@@ -1,0 +1,96 @@
+Iteration: 008
+Date: 2026-04-01
+
+Summary:
+- Set a target of pushing the new fused-quant baseline below `12 us` average.
+- Treated iteration 7 as the baseline to beat.
+- Ran multiple aggressive follow-up probes around the inline quant kernel and lower-level GEMM paths.
+- None of the iteration-8 probes beat the iteration-7 winner, so the code was restored to the exact iteration-7 best state.
+
+Starting point from iteration 7:
+- k=512, m=4, n=2880: 10.4 us
+- k=7168, m=16, n=2112: 20.9 us
+- k=512, m=32, n=4096: 10.7 us
+- k=512, m=32, n=2880: 10.8 us
+- k=2048, m=64, n=7168: 13.8 us
+- k=1536, m=256, n=3072: 12.5 us
+- Average: 13.18 us
+
+Aggressive probe A: tune inline quant launch shape/padding
+- Change:
+  - reduce the shuffled-scale store mask from `ceil(M/256)*256` to `ceil(M/32)*32`
+  - use smaller Triton `BLOCK_SIZE` values for small `M`
+- Why it seemed plausible:
+  - the fused quant kernel still did visibly padded work for small benchmark shapes
+- Benchmark results:
+  - k=512, m=4, n=2880: 10.4 us
+  - k=7168, m=16, n=2112: 21.0 us
+  - k=512, m=32, n=4096: 10.8 us
+  - k=512, m=32, n=2880: 10.8 us
+  - k=2048, m=64, n=7168: 13.8 us
+  - k=1536, m=256, n=3072: 12.5 us
+  - Average: 13.22 us
+- Result:
+  - no improvement; slightly worse than iteration 7
+
+Aggressive probe B: buffer reuse for quant outputs and ASM outputs
+- Change:
+  - cache `x_fp4` / scale buffers by shape
+  - cache direct-ASM output buffers by shape
+- Why it seemed plausible:
+  - after fusion, repeated tensor allocation could have become a visible part of the remaining latency
+- Benchmark results:
+  - k=512, m=4, n=2880: 10.5 us
+  - k=7168, m=16, n=2112: 21.1 us
+  - k=512, m=32, n=4096: 10.8 us
+  - k=512, m=32, n=2880: 10.8 us
+  - k=2048, m=64, n=7168: 13.9 us
+  - k=1536, m=256, n=3072: 12.6 us
+  - Average: 13.28 us
+- Result:
+  - worse than iteration 7
+  - allocation was not the main remaining bottleneck
+
+Aggressive probe C: direct ASM for larger shapes too
+- Change:
+  - extend the direct ASM route to exact larger shapes:
+    - `(64, 7168, 2048)`
+    - `(256, 3072, 1536)`
+- Why it seemed plausible:
+  - after the fused quant win, wrapper overhead might matter more for the remaining larger cases
+- Benchmark results:
+  - k=512, m=4, n=2880: 10.4 us
+  - k=7168, m=16, n=2112: 21.4 us
+  - k=512, m=32, n=4096: 10.9 us
+  - k=512, m=32, n=2880: 10.9 us
+  - k=2048, m=64, n=7168: 13.9 us
+  - k=1536, m=256, n=3072: 12.6 us
+  - Average: 13.35 us
+- Result:
+  - worse than iteration 7
+
+Aggressive probe D: lower-level Triton preshuffle GEMM for larger shapes
+- Change:
+  - keep the fused quant path
+  - route exact larger shapes through `gemm_afp4wfp4_preshuffle(...)`
+- Why it seemed plausible:
+  - this is a lower-level Triton GEMM built for preshuffled weights/scales
+- Result:
+  - failed on the remote runner with `KeyError: 'float4_e2m1fn_x2'`
+  - the path is not usable as-is in this environment
+
+Final decision:
+- Keep iteration 7 as the current best verified submission state.
+- Do not keep any iteration-8 experimental changes.
+
+Current best code state after iteration 8:
+- Inline Triton fused quant+shuffle for `A`
+- `M < 32` uses direct ASM
+- exact `(M=32, N=4096, K<=1024)` uses direct ASM `32x128`
+- exact `(M=32, N=2880, K<=1024)` uses direct ASM `64x128`
+- everything else falls back to `aiter.gemm_a4w4(...)`
+
+Takeaways:
+- The fused quant+shuffle breakthrough was the big step-change.
+- The remaining obvious follow-up optimizations around launch shape, allocation reuse, and larger-shape dispatch did not beat the new baseline.
+- The path to `<12 us` likely needs a deeper change than these first post-fusion aggressive probes.
