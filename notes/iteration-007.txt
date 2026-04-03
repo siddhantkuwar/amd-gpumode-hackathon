@@ -1,0 +1,68 @@
+Iteration: 007
+Date: 2026-04-01
+
+Summary:
+- Switched from the library quantization path `dynamic_mxfp4_quant(x)` followed by a separate `e8m0_shuffle(...)` pass to an inline Triton implementation that writes shuffled scales directly in one kernel.
+- Kept the current best GEMM dispatch table unchanged.
+- Result: a very large verified speedup with full correctness preserved.
+
+Starting point from the iteration-4 best state:
+- k=512, m=4, n=2880: 17.8 us
+- k=7168, m=16, n=2112: 29.9 us
+- k=512, m=32, n=4096: 18.3 us
+- k=512, m=32, n=2880: 18.4 us
+- k=2048, m=64, n=7168: 24.4 us
+- k=1536, m=256, n=3072: 22.9 us
+- Average: 21.95 us
+
+Aggressive change kept:
+- Added an inline Triton kernel in `submission.py` that reproduces the public AITER MXFP4 quantization path while emitting shuffled scale layout directly.
+- Replaced:
+  - `dynamic_mxfp4_quant(A)`
+  - `e8m0_shuffle(...)`
+- With:
+  - `_quant_mxfp4_shuffled_inline(A)`
+- Kept the current best GEMM dispatch table exactly the same:
+  - `M < 32` -> direct ASM
+  - exact `(M=32, N=4096, K<=1024)` -> direct ASM `32x128`
+  - exact `(M=32, N=2880, K<=1024)` -> direct ASM `64x128`
+  - everything else -> `aiter.gemm_a4w4(...)`
+
+Why this works:
+- Before iteration 7, the hot path for `A` quantization did two GPU-side steps:
+  - quantize `A`
+  - reorder/shuffle scale metadata
+- The inline Triton path folds those into one quantization kernel that writes the shuffled scale layout directly.
+- That removes an extra tensor transform and a full extra pass over the scale tensor.
+
+Iteration-7 benchmark results:
+- k=512, m=4, n=2880: 10.4 us
+- k=7168, m=16, n=2112: 20.9 us
+- k=512, m=32, n=4096: 10.7 us
+- k=512, m=32, n=2880: 10.8 us
+- k=2048, m=64, n=7168: 13.8 us
+- k=1536, m=256, n=3072: 12.5 us
+- Average: 13.18 us
+
+Delta vs iteration 4:
+- k=512, m=4, n=2880: -7.4 us
+- k=7168, m=16, n=2112: -9.0 us
+- k=512, m=32, n=4096: -7.6 us
+- k=512, m=32, n=2880: -7.6 us
+- k=2048, m=64, n=7168: -10.6 us
+- k=1536, m=256, n=3072: -10.4 us
+- Average change: -8.77 us
+- Relative average improvement over iteration 4: about 40.0%
+
+Delta vs original baseline:
+- Average change from baseline: -10.04 us
+- Relative average improvement from baseline: about 43.2%
+
+Correctness:
+- Iteration-7 submission passed 4/4 tests
+- Maximum error: 0.0 on all reported test cases
+
+Takeaways:
+- The quantization/shuffle path was a much larger bottleneck than the remaining GEMM dispatch issues.
+- Public AITER Triton source was enough to build a runner-compatible fused quant+shuffle path without writing raw HIP first.
+- The next optimization rounds should treat this inline quant path as the new baseline.

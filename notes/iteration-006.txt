@@ -1,0 +1,68 @@
+Iteration: 006
+Date: 2026-04-01
+
+Summary:
+- Followed the safe iteration-6 plan: keep the iteration-4 best as the base and probe only exact-shape kernel substitutions for the slow high-K case `(M=16, N=2112, K=7168)`.
+- Tested two exact direct-ASM alternatives.
+- Neither candidate beat the iteration-4 baseline, so the code was reverted back to the iteration-4 best state.
+
+Starting point from iteration 4 / current best:
+- k=512, m=4, n=2880: 17.8 us
+- k=7168, m=16, n=2112: 29.9 us
+- k=512, m=32, n=4096: 18.3 us
+- k=512, m=32, n=2880: 18.4 us
+- k=2048, m=64, n=7168: 24.4 us
+- k=1536, m=256, n=3072: 22.9 us
+- Average: 21.95 us
+
+Candidate A:
+- Change:
+  - for exact `(M=16, N=2112, K=7168)`, switch direct ASM kernel from `32x128` to `64x128`
+  - keep all other routing identical to iteration 4
+- Why it seemed plausible:
+  - this was the slowest remaining untuned benchmark case
+  - a nearby direct-kernel variant was worth testing before moving to a more aggressive layer
+- Benchmark results:
+  - k=512, m=4, n=2880: 17.7 us
+  - k=7168, m=16, n=2112: 30.1 us
+  - k=512, m=32, n=4096: 18.4 us
+  - k=512, m=32, n=2880: 18.3 us
+  - k=2048, m=64, n=7168: 24.3 us
+  - k=1536, m=256, n=3072: 22.9 us
+  - Average: 21.95 us
+- Result:
+  - target shape regressed from 29.9 us to 30.1 us
+  - overall average was not better than the current best
+
+Candidate B:
+- Change:
+  - for exact `(M=16, N=2112, K=7168)`, switch direct ASM kernel from `32x128` to `128x128`
+  - keep all other routing identical to iteration 4
+- Why it seemed plausible:
+  - public AITER tuning data uses `128x128` for some other `M=16` regions, so this was the next safest exact-shape probe
+- Benchmark results:
+  - k=512, m=4, n=2880: 18.3 us
+  - k=7168, m=16, n=2112: 31.1 us
+  - k=512, m=32, n=4096: 18.7 us
+  - k=512, m=32, n=2880: 18.9 us
+  - k=2048, m=64, n=7168: 24.3 us
+  - k=1536, m=256, n=3072: 23.2 us
+  - Average: 22.42 us
+- Result:
+  - clearly worse than the current best
+  - target shape regressed significantly
+
+Final decision:
+- Keep iteration-4 routing as the best verified submission state.
+- Do not keep either iteration-6 candidate.
+
+Current best code state after iteration 6:
+- `M < 32` uses direct ASM
+- exact `(M=32, N=4096, K<=1024)` uses direct ASM `32x128`
+- exact `(M=32, N=2880, K<=1024)` uses direct ASM `64x128`
+- everything else falls back to `aiter.gemm_a4w4(...)`
+
+Takeaways:
+- The obvious safe kernel substitutions for the remaining high-K small-M case do not beat the current best.
+- Safe dispatch-only tuning is approaching diminishing returns.
+- The next serious upside likely requires a more aggressive optimization layer than one more exact ASM swap.

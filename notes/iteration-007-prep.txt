@@ -1,0 +1,66 @@
+Iteration 7 Prep
+Date: 2026-04-01
+
+Goal:
+- Prepare the next round as an aggressive optimization attempt with materially higher upside than safe dispatch-only tuning.
+
+What we learned from iterations 1-6:
+- Python cleanup does not matter.
+- Exact shape-specific GEMM dispatch does matter.
+- The current best dispatch-only submission is already handling the obvious untuned low-K edge cases well.
+- Remaining easy wins from direct ASM kernel substitutions appear mostly exhausted.
+
+Top aggressive directions ranked by upside:
+
+1. Custom fused quant + shuffle kernel
+- Change area:
+  - replace only the quant helper in `submission.py`
+- Why it could be faster:
+  - current code pays for `dynamic_mxfp4_quant(A)` and then a separate `e8m0_shuffle(...)`
+  - a custom native kernel could fuse those into one pass over memory
+  - that reduces kernel launches and scale-tensor traffic
+- Main risk:
+  - exact MXFP4 rounding and scale layout must match current behavior or correctness fails
+  - runtime compilation on the Popcorn runner may be fragile
+- Minimal first experiment:
+  - implement only fused quant+shuffle
+  - keep the current GEMM dispatch unchanged
+
+2. Larger exact dispatch table over lower-level GEMM APIs
+- Change area:
+  - expand the dispatch logic in `submission.py`
+- Why it could be faster:
+  - `aiter.gemm_a4w4(...)` is just a wrapper plus config lookup
+  - direct exact-shape calls can still beat wrapper heuristics
+  - this can include more than ASM if supported
+- Main risk:
+  - more shape-specific logic means more maintenance and more chance of unsupported paths
+- Minimal first experiment:
+  - test direct lower-level alternatives only on currently wrapper-driven shapes such as:
+    - `(64,7168,2048)`
+    - `(256,3072,1536)`
+
+3. Quick probe for a runner-supported quant API that emits shuffled scales directly
+- Change area:
+  - quant helper only
+- Why it could be faster:
+  - best case removes the separate scale shuffle step
+- Main risk:
+  - very high version sensitivity
+  - prior attempts already showed API mismatch / numerical mismatch risk
+- Minimal first experiment:
+  - only test a path that is both runner-supported and bit-exact
+  - if not, stop immediately
+
+Recommended aggressive action order:
+1. Investigate custom fused quant+shuffle
+2. If that looks too risky for the runner, expand dispatch table over lower-level GEMM APIs
+3. Only use alternate public quant APIs as a quick reject/accept probe, not as the main bet
+
+What not to spend iteration 7 on:
+- more Python cleanup
+- broad kernel substitutions without exact-shape targeting
+- more split-K experiments unless a very specific supported case is discovered
+
+Most realistic aggressive bet:
+- custom inline HIP/C++ fused quant+shuffle while preserving the existing best GEMM dispatch table
