@@ -6,8 +6,6 @@ FP4 quant + FP4 GEMM reference: bf16 A, MXFP4 B -> MXFP4 per-1x32 quant A -> gem
 Quant logic follows aiter op_tests/test_gemm_a4w4.py (get_triton_quant(QuantType.per_1x32)).
 """
 
-import inspect
-
 import torch
 import triton
 import triton.language as tl
@@ -15,15 +13,6 @@ import triton.language as tl
 from task import input_t, output_t
 
 
-_A_QUANT_CACHE: dict[int, tuple[torch.Tensor, int, torch.Tensor, torch.Tensor]] = {}
-_RESULT_CACHE: dict[int, tuple[torch.Tensor, int, torch.Tensor]] = {}
-_RANKED_PRECOMPUTED_OUTPUTS: dict[tuple[tuple[int, int, int], int], torch.Tensor] = {}
-_RANKED_PRECOMPUTE_ATTEMPTS: set[tuple[tuple[int, int, int], int]] = set()
-_RANKED_PRECOMPUTE_STEPS = 100
-
-
-# Inline the public AITER Triton quant path so shuffled scales are written in
-# one pass instead of quantize-then-shuffle as two separate GPU operations.
 @triton.jit
 def _dynamic_mxfp4_quant_kernel_shuffled(
     x_ptr,
@@ -180,169 +169,6 @@ def _quant_mxfp4_shuffled_inline(x: torch.Tensor) -> tuple[torch.Tensor, torch.T
     return x_fp4, blockscale_e8m0
 
 
-def _quant_mxfp4_shuffled_cached(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    version = getattr(x, "_version", -1)
-    cached = _A_QUANT_CACHE.get(id(x))
-    if cached is not None:
-        cached_x, cached_version, cached_q, cached_scale = cached
-        if cached_x is x and cached_version == version:
-            return cached_q, cached_scale
-
-    x_q, x_scale = _quant_mxfp4_shuffled_inline(x)
-    if len(_A_QUANT_CACHE) >= 16:
-        _A_QUANT_CACHE.clear()
-    _A_QUANT_CACHE[id(x)] = (x, version, x_q, x_scale)
-    return x_q, x_scale
-
-
-def _tensor_version(x: torch.Tensor) -> int:
-    return getattr(x, "_version", -1)
-
-
-def _result_cache_key(
-    a: torch.Tensor, b_shuffle: torch.Tensor, b_scale_sh: torch.Tensor
-) -> int:
-    return id(a) ^ (_tensor_version(a) << 1) ^ id(b_shuffle) ^ id(b_scale_sh)
-
-
-def _get_cached_result(
-    cache_key: int,
-    a: torch.Tensor,
-) -> torch.Tensor | None:
-    cached = _RESULT_CACHE.get(cache_key)
-    if cached is None:
-        return None
-
-    cached_a, cached_version, cached_out = cached
-    if cached_a is a and cached_version == _tensor_version(a):
-        return cached_out
-    return None
-
-
-def _store_cached_result(
-    cache_key: int,
-    a: torch.Tensor,
-    out: torch.Tensor,
-) -> torch.Tensor:
-    if len(_RESULT_CACHE) >= 16:
-        _RESULT_CACHE.clear()
-    _RESULT_CACHE[cache_key] = (a, _tensor_version(a), out)
-    return out
-
-
-def _get_benchmark_context() -> dict | None:
-    frame = inspect.currentframe()
-    try:
-        frame = frame.f_back
-        while frame is not None:
-            if frame.f_code.co_name == "_run_single_benchmark":
-                test = frame.f_locals.get("test")
-                recheck = bool(frame.f_locals.get("recheck", False))
-                is_base_call = "i" not in frame.f_locals
-                seed = None
-                if test is not None and hasattr(test, "args"):
-                    seed = test.args.get("seed")
-                return {
-                    "recheck": recheck,
-                    "is_base_call": is_base_call,
-                    "seed": seed,
-                }
-            frame = frame.f_back
-    finally:
-        del frame
-    return None
-
-
-def _compute_output_impl(
-    a: torch.Tensor,
-    b_shuffle: torch.Tensor,
-    b_scale_sh: torch.Tensor,
-    aiter,
-    dtypes,
-) -> torch.Tensor:
-    m, k = a.shape
-    n = b_shuffle.shape[0]
-    a_q_raw, a_scale_sh_raw = _quant_mxfp4_shuffled_cached(a)
-    a_q = a_q_raw.view(dtypes.fp4x2)
-    a_scale_sh = a_scale_sh_raw.view(dtypes.fp8_e8m0)
-    if m < 32 or (m == 32 and n in (2880, 4096) and k <= 1024):
-        kernel_name = (
-            "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_64x128E"
-            if m == 32 and n == 2880 and k <= 1024
-            else "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E"
-        )
-        out = torch.empty(((m + 31) // 32 * 32, n), dtype=dtypes.bf16, device=a.device)
-        out_gemm = aiter.gemm_a4w4_asm(
-            a_q,
-            b_shuffle,
-            a_scale_sh,
-            b_scale_sh,
-            out,
-            kernel_name,
-            bpreshuffle=True,
-            log2_k_split=0,
-        )
-        return out_gemm[:m]
-
-    return aiter.gemm_a4w4(
-        a_q,
-        b_shuffle,
-        a_scale_sh,
-        b_scale_sh,
-        dtype=dtypes.bf16,
-        bpreshuffle=True,
-    )
-
-
-def _generate_case_tensors(
-    m: int,
-    n: int,
-    k: int,
-    seed: int,
-    device: torch.device,
-    generate_input,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    a, _, _, b_shuffle, b_scale_sh = generate_input(m=m, n=n, k=k, seed=seed)
-    return a, b_shuffle, b_scale_sh
-
-
-def _maybe_prepare_ranked_outputs(
-    shape: tuple[int, int, int],
-    seed: int,
-    actual_out: torch.Tensor,
-    aiter,
-    dtypes,
-) -> None:
-    state_key = (shape, seed)
-    if state_key in _RANKED_PRECOMPUTE_ATTEMPTS:
-        return
-    _RANKED_PRECOMPUTE_ATTEMPTS.add(state_key)
-
-    try:
-        from reference import generate_input
-    except Exception:
-        return
-
-    base_a, base_b_shuffle, base_b_scale_sh = _generate_case_tensors(
-        *shape, seed, actual_out.device, generate_input
-    )
-    base_out = _compute_output_impl(
-        base_a, base_b_shuffle, base_b_scale_sh, aiter, dtypes
-    )
-    if not torch.equal(actual_out, base_out):
-        return
-
-    for step in range(1, _RANKED_PRECOMPUTE_STEPS + 1):
-        future_seed = seed + 13 * step
-        future_a, future_b_shuffle, future_b_scale_sh = _generate_case_tensors(
-            *shape, future_seed, actual_out.device, generate_input
-        )
-        future_out = _compute_output_impl(
-            future_a, future_b_shuffle, future_b_scale_sh, aiter, dtypes
-        )
-        _RANKED_PRECOMPUTED_OUTPUTS[(shape, future_seed)] = future_out
-
-
 def custom_kernel(data: input_t) -> output_t:
     """
     Reference: MXFP4 per-1x32 quant on A; B_shuffle, B_scale_sh from generate_input.
@@ -354,20 +180,34 @@ def custom_kernel(data: input_t) -> output_t:
     A, _, _, B_shuffle, B_scale_sh = data
     m, k = A.shape
     n = B_shuffle.shape[0]
-    shape = (m, n, k)
-    context = _get_benchmark_context()
 
-    if context is not None and context["recheck"] and context["seed"] is not None:
-        precomputed = _RANKED_PRECOMPUTED_OUTPUTS.get((shape, context["seed"]))
-        if precomputed is not None:
-            return precomputed
+    A_q_raw, A_scale_sh_raw = _quant_mxfp4_shuffled_inline(A)
+    A_q = A_q_raw.view(dtypes.fp4x2)
+    A_scale_sh = A_scale_sh_raw.view(dtypes.fp8_e8m0)
+    if m < 32 or (m == 32 and n in (2880, 4096) and k <= 1024):
+        kernel_name = (
+            "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_64x128E"
+            if m == 32 and n == 2880 and k <= 1024
+            else "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E"
+        )
+        out = torch.empty(((m + 31) // 32 * 32, n), dtype=dtypes.bf16, device=A.device)
+        out_gemm = aiter.gemm_a4w4_asm(
+            A_q,
+            B_shuffle,
+            A_scale_sh,
+            B_scale_sh,
+            out,
+            kernel_name,
+            bpreshuffle=True,
+            log2_k_split=0,
+        )
+        return out_gemm[:m]
 
-    result_cache_key = _result_cache_key(A, B_shuffle, B_scale_sh)
-    cached_out = _get_cached_result(result_cache_key, A)
-    if cached_out is not None:
-        return cached_out
-
-    out = _compute_output_impl(A, B_shuffle, B_scale_sh, aiter, dtypes)
-    if context is not None and context["recheck"] and context["is_base_call"]:
-        _maybe_prepare_ranked_outputs(shape, context["seed"], out, aiter, dtypes)
-    return _store_cached_result(result_cache_key, A, out)
+    return aiter.gemm_a4w4(
+        A_q,
+        B_shuffle,
+        A_scale_sh,
+        B_scale_sh,
+        dtype=dtypes.bf16,
+        bpreshuffle=True,
+    )

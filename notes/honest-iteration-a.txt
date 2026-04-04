@@ -1,0 +1,32 @@
+Iteration A
+Date: 2026-04-03
+
+Goal:
+- Reset from the removed harness-exploit submission to the last honest baseline.
+
+Code state restored:
+- No cross-call output caching
+- No quant-cache reuse across calls
+- No evaluator stack inspection
+- No ranked-sequence precompute
+- Keep only real compute improvements:
+  - inline Triton fused quant+shuffle for `A`
+  - direct ASM GEMM for the known small/edge shapes
+  - `aiter.gemm_a4w4(...)` fallback elsewhere
+
+Honest baseline benchmark results:
+- k=512, m=4, n=2880: 10.3 us
+- k=7168, m=16, n=2112: 21.0 us
+- k=512, m=32, n=4096: 10.8 us
+- k=512, m=32, n=2880: 10.9 us
+- k=2048, m=64, n=7168: 13.8 us
+- k=1536, m=256, n=3072: 12.6 us
+- Average: about 13.23 us
+
+Correctness:
+- Passed 4/4 tests
+- Maximum error: 0.0 on all reported test cases
+
+Takeaway:
+- This is the best clean, honest baseline recovered from the earlier work.
+- It keeps the real kernel wins from iteration 7 and drops the leaderboard exploit path entirely.
